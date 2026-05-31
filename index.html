@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
+
+<!-- PWA / iOS standalone -->
+<title>Drill</title>
+<link rel="manifest" href="./manifest.json">
+<meta name="theme-color" content="#ffffff">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Drill">
+<link rel="apple-touch-icon" href="./icon-192.png">
+
+<style>
+  :root{
+    --bg:#ffffff;
+    --fg:#111111;
+    --muted:#6b7280;
+    --line:#e5e7eb;
+    --accent:#3538cd;      /* single accent: indigo */
+    --wrong:#d11a2a;
+    --btn:#f4f4f5;
+    --btn-active:#e4e4e7;
+  }
+
+  *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body{ margin:0; padding:0; }
+  body{
+    background:var(--bg);
+    color:var(--fg);
+    font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, sans-serif;
+    -webkit-user-select:none; user-select:none;
+    overscroll-behavior:none;
+  }
+  /* tabular numerals everywhere numbers matter */
+  .num{ font-variant-numeric:tabular-nums; font-feature-settings:"tnum" 1; }
+
+  .app{
+    height:100vh; height:100dvh;
+    display:flex; flex-direction:column;
+    max-width:560px; margin:0 auto;
+  }
+  .view{ display:none; flex:1; min-height:0; flex-direction:column; }
+  .view.active{ display:flex; }
+
+  /* ---------------- HOME ---------------- */
+  #home{ padding:max(20px,env(safe-area-inset-top)) 22px max(20px,env(safe-area-inset-bottom)); overflow-y:auto; }
+  .brand{ font-size:15px; font-weight:700; letter-spacing:.22em; text-transform:uppercase; color:var(--fg); margin:6px 0 26px; }
+  .grouplabel{ font-size:12px; font-weight:700; letter-spacing:.12em; text-transform:uppercase; color:var(--muted); margin:0 0 10px; }
+  .chips{ display:flex; gap:8px; flex-wrap:wrap; margin-bottom:24px; }
+  .chip{
+    flex:1 1 0; min-width:64px;
+    border:1.5px solid var(--line); background:var(--bg); color:var(--fg);
+    border-radius:12px; padding:13px 6px; font-size:16px; font-weight:600;
+    cursor:pointer; touch-action:manipulation;
+  }
+  .chip[aria-pressed="true"]{ border-color:var(--accent); color:var(--accent); }
+  .start{
+    width:100%; border:none; background:var(--accent); color:#fff;
+    border-radius:14px; padding:20px; font-size:21px; font-weight:700;
+    cursor:pointer; touch-action:manipulation; margin-top:6px;
+  }
+  .start:active{ filter:brightness(.92); }
+
+  .hist{ margin-top:34px; }
+  .hist h2{ font-size:12px; font-weight:700; letter-spacing:.12em; text-transform:uppercase; color:var(--muted); margin:0 0 6px; }
+  .histrow{ display:flex; justify-content:space-between; gap:12px; padding:11px 0; border-bottom:1px solid var(--line); font-size:15px; }
+  .histrow .meta{ color:var(--muted); }
+  .histrow .res{ font-weight:700; }
+  .histempty{ color:var(--muted); font-size:15px; padding:8px 0; }
+  .footer{ margin-top:28px; text-align:center; }
+  .reset{ background:none; border:none; color:var(--muted); font-size:13px; text-decoration:underline; cursor:pointer; padding:8px; }
+
+  /* ---------------- DRILL ---------------- */
+  #drill{ padding-top:max(10px,env(safe-area-inset-top)); }
+  .bar{ display:flex; align-items:center; justify-content:space-between; padding:8px 18px; height:48px; }
+  .quit{ background:none; border:none; font-size:24px; line-height:1; color:var(--muted); cursor:pointer; width:44px; height:44px; touch-action:manipulation; }
+  .status{ font-size:22px; font-weight:700; }
+  .status.timer{ color:var(--accent); }
+  .status.timer.low{ color:var(--wrong); }
+  .score{ font-size:16px; font-weight:600; color:var(--muted); width:44px; text-align:right; }
+
+  .stage{ flex:1; min-height:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px; padding:0 16px; }
+  .problem{ font-size:clamp(3rem,19vw,6.5rem); font-weight:700; letter-spacing:-.02em; line-height:1; text-align:center; }
+  .answerbox{ font-size:clamp(2rem,12vw,4rem); font-weight:600; min-height:1.2em; line-height:1.2; color:var(--accent); }
+  .answerbox.empty{ color:var(--line); }
+  .answerbox.bad{ color:var(--wrong); }
+  .hint{ font-size:16px; color:var(--wrong); min-height:22px; font-weight:600; }
+
+  .pad{
+    display:grid; grid-template-columns:repeat(3,1fr); gap:8px;
+    padding:8px 12px calc(12px + env(safe-area-inset-bottom));
+  }
+  .key{
+    border:none; background:var(--btn); color:var(--fg);
+    border-radius:12px; font-size:clamp(1.5rem,7vw,2rem); font-weight:600;
+    height:clamp(58px,9.5vh,82px); cursor:pointer; touch-action:manipulation;
+  }
+  .key:active{ background:var(--btn-active); }
+  .key.spacer{ background:none; cursor:default; }
+  .key.back{ font-size:1.6rem; }
+
+  /* ---------------- RESULTS ---------------- */
+  #results{ padding:max(20px,env(safe-area-inset-top)) 22px max(20px,env(safe-area-inset-bottom)); overflow-y:auto; justify-content:flex-start; }
+  .rspace{ flex:1; min-height:14px; }
+  .bignum{ font-size:clamp(4rem,26vw,8rem); font-weight:700; line-height:1; text-align:center; letter-spacing:-.02em; }
+  .blabel{ text-align:center; font-size:17px; color:var(--muted); margin-top:8px; }
+  .acc{ text-align:center; font-size:17px; margin-top:22px; font-weight:600; }
+  .missed{ margin-top:26px; }
+  .missed h3{ font-size:12px; font-weight:700; letter-spacing:.12em; text-transform:uppercase; color:var(--muted); margin:0 0 10px; }
+  .misschips{ display:flex; flex-wrap:wrap; gap:8px; }
+  .miss{ border:1.5px solid var(--line); border-radius:10px; padding:8px 12px; font-size:16px; font-weight:600; }
+  .nomiss{ color:var(--muted); font-size:15px; }
+  .ractions{ display:flex; gap:10px; margin-top:30px; }
+  .ractions button{ flex:1; border-radius:14px; padding:18px; font-size:18px; font-weight:700; cursor:pointer; touch-action:manipulation; }
+  .again{ border:none; background:var(--accent); color:#fff; }
+  .again:active{ filter:brightness(.92); }
+  .home{ border:1.5px solid var(--line); background:var(--bg); color:var(--fg); }
+  .home:active{ background:var(--btn); }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ================= HOME ================= -->
+  <section id="home" class="view active">
+    <div class="brand">Drill</div>
+
+    <div class="grouplabel">Range</div>
+    <div class="chips" id="rangeChips"></div>
+
+    <div class="grouplabel">Mode</div>
+    <div class="chips" id="modeChips"></div>
+
+    <button class="start" id="startBtn">Start</button>
+
+    <div class="hist">
+      <h2>Recent</h2>
+      <div id="histList"></div>
+    </div>
+
+    <div class="footer">
+      <button class="reset" id="resetBtn">Clear history &amp; mistakes</button>
+    </div>
+  </section>
+
+  <!-- ================= DRILL ================= -->
+  <section id="drill" class="view">
+    <div class="bar">
+      <button class="quit" id="quitBtn" aria-label="Quit">&times;</button>
+      <div class="status num" id="status">60</div>
+      <div class="score num" id="scoreLabel">0</div>
+    </div>
+
+    <div class="stage">
+      <div class="problem num" id="problem">&nbsp;</div>
+      <div class="answerbox num empty" id="answer">&nbsp;</div>
+      <div class="hint num" id="hint">&nbsp;</div>
+    </div>
+
+    <div class="pad" id="pad">
+      <button class="key num" data-k="1">1</button>
+      <button class="key num" data-k="2">2</button>
+      <button class="key num" data-k="3">3</button>
+      <button class="key num" data-k="4">4</button>
+      <button class="key num" data-k="5">5</button>
+      <button class="key num" data-k="6">6</button>
+      <button class="key num" data-k="7">7</button>
+      <button class="key num" data-k="8">8</button>
+      <button class="key num" data-k="9">9</button>
+      <button class="key spacer" disabled></button>
+      <button class="key num" data-k="0">0</button>
+      <button class="key back" data-k="back" aria-label="Delete">&#9003;</button>
+    </div>
+  </section>
+
+  <!-- ================= RESULTS ================= -->
+  <section id="results" class="view">
+    <div class="rspace"></div>
+    <div class="bignum num" id="rBig">0</div>
+    <div class="blabel" id="rLabel"></div>
+    <div class="acc num" id="rAcc"></div>
+
+    <div class="missed">
+      <h3>Missed</h3>
+      <div class="misschips" id="rMissed"></div>
+    </div>
+
+    <div class="ractions">
+      <button class="home" id="rHome">Home</button>
+      <button class="again" id="rAgain">Again</button>
+    </div>
+    <div class="rspace"></div>
+  </section>
+
+</div>
+
+<script>
+"use strict";
+/* =========================================================================
+   Mental Math Drill — single file, vanilla JS, offline PWA.
+   Storage keys are versioned (v1) so the schema can evolve later.
+   ========================================================================= */
+
+const K = {
+  stats: "mathdrill.v1.stats",   // { statKey: {correct, wrong} }
+  hist:  "mathdrill.v1.history",  // [ {ts, mode, range, op, score, total, timeMs} ]  (max 10)
+  prefs: "mathdrill.v1.prefs"     // { range, mode, op }
+};
+
+function load(key, def){
+  try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : def; }
+  catch(e){ return def; }
+}
+function save(key, val){
+  try { localStorage.setItem(key, JSON.stringify(val)); } catch(e){}
+}
+
+const ri = (a,b) => Math.floor(Math.random()*(b-a+1))+a;
+
+/* -------------------------------------------------------------------------
+   OPERATIONS — the extension point.
+   Every operation implements the same small interface, and the rest of the
+   app only ever talks to the *active* operation through it. To add a new
+   operation (division, percentages, fractions), add an entry here and a chip
+   in OP_ORDER below — no other code needs to change.
+
+     enumerate(min,max) -> [ {answer, key, ...operands} ]
+         The full set of DISTINCT problems for a range. Used both to draw
+         problems from and to weight them by past mistakes. `key` is the
+         canonical id used for mistake tracking (so e.g. 7x8 and 8x7 count
+         as the same fact for multiplication).
+
+     display(p) -> string
+         How to render a chosen problem. May randomize presentation
+         (e.g. operand order) without changing the canonical key.
+
+     missLabel(key) -> string
+         Pretty version of a stored key for the "Missed" list.
+   ------------------------------------------------------------------------- */
+const OPS = {
+  mul: {
+    symbol: "×",
+    enumerate(min, max){
+      const out = [];
+      for (let i = min; i <= max; i++){
+        for (let j = i; j <= max; j++){      // i<=j -> commutative pairs only
+          out.push({ a:i, b:j, answer:i*j, key:`mul:${i}x${j}` });
+        }
+      }
+      return out;
+    },
+    display(p){
+      // randomize operand order for presentation; answer/key unchanged
+      return Math.random() < 0.5 ? `${p.a} × ${p.b}` : `${p.b} × ${p.a}`;
+    },
+    missLabel(key){
+      const [a,b] = key.slice(4).split("x");
+      return `${a} × ${b}`;
+    }
+  }
+
+  /* Example of a future, non-commutative operation:
+  ,div: {
+    symbol: "÷",
+    enumerate(min,max){
+      const out=[];
+      for(let i=min;i<=max;i++) for(let j=min;j<=max;j++){
+        out.push({a:i*j, b:i, answer:j, key:`div:${i*j}/${i}`});
+      }
+      return out;
+    },
+    display(p){ return `${p.a} ÷ ${p.b}`; },         // order is fixed for division
+    missLabel(key){ const [a,b]=key.slice(4).split("/"); return `${a} ÷ ${b}`; }
+  }
+  */
+};
+const OP_ORDER = ["mul"];                 // operations exposed in the UI, in order
+const OP_NAMES = { mul:"Multiply", div:"Divide", pct:"Percent", frac:"Fraction" };
+
+const RANGES = { "1-10":[1,10], "1-12":[1,12], "1-15":[1,15], "1-20":[1,20] };
+const RANGE_ORDER = ["1-10","1-12","1-15","1-20"];
+const MODES = { timed:"Timed 60s", fixed:"100 questions" };
+const MODE_ORDER = ["timed","fixed"];
+
+const TIMED_MS = 60000;
+const FIXED_Q  = 100;
+const MISTAKE_MAX_BOOST = 2;   // weight = 1 + 2*missRate  ->  up to ~3x for always-missed
+
+/* ---------------- preferences ---------------- */
+let prefs = load(K.prefs, { range:"1-12", mode:"timed", op:"mul" });
+if (!RANGES[prefs.range]) prefs.range = "1-12";
+if (!MODES[prefs.mode])  prefs.mode  = "timed";
+if (!OPS[prefs.op])      prefs.op    = "mul";
+
+/* ---------------- session state ---------------- */
+let S = null;
+
+const el = id => document.getElementById(id);
+
+/* ============================ HOME ============================ */
+function renderChips(containerId, order, labelMap, selectedKey, onPick){
+  const c = el(containerId);
+  c.innerHTML = "";
+  order.forEach(key => {
+    const b = document.createElement("button");
+    b.className = "chip";
+    b.textContent = labelMap[key];
+    b.setAttribute("aria-pressed", key === selectedKey ? "true" : "false");
+    b.addEventListener("click", () => onPick(key));
+    c.appendChild(b);
+  });
+}
+
+function renderHome(){
+  const rangeLabels = {}; RANGE_ORDER.forEach(r => rangeLabels[r] = r.replace("-","–"));
+  renderChips("rangeChips", RANGE_ORDER, rangeLabels, prefs.range, k => { prefs.range = k; save(K.prefs, prefs); renderHome(); });
+  renderChips("modeChips", MODE_ORDER, { timed:"Timed", fixed:"Fixed 100" }, prefs.mode, k => { prefs.mode = k; save(K.prefs, prefs); renderHome(); });
+  renderHistory();
+}
+
+function fmtTime(ms){
+  const s = Math.round(ms/1000);
+  return Math.floor(s/60) + ":" + String(s%60).padStart(2,"0");
+}
+function fmtDate(ts){
+  return new Date(ts).toLocaleDateString(undefined, { month:"short", day:"numeric" });
+}
+
+function renderHistory(){
+  const list = el("histList");
+  const hist = load(K.hist, []);
+  if (!hist.length){ list.innerHTML = '<div class="histempty">No sessions yet.</div>'; return; }
+  list.innerHTML = "";
+  hist.forEach(h => {
+    const row = document.createElement("div");
+    row.className = "histrow";
+    const range = h.range.replace("-","–");
+    const result = h.mode === "timed" ? `${h.score} correct` : fmtTime(h.timeMs);
+    row.innerHTML =
+      `<span class="meta num">${fmtDate(h.ts)} · ${range} · ${h.mode}</span>` +
+      `<span class="res num">${result}</span>`;
+    list.appendChild(row);
+  });
+}
+
+/* ============================ DRILL ============================ */
+function buildPool(){
+  const [mn, mx] = RANGES[prefs.range];
+  return OPS[prefs.op].enumerate(mn, mx);
+}
+
+/* Weighted draw: a problem's weight is 1 + 2*missRate, where missRate is the
+   share of past first-attempts that were wrong. Never-seen / always-correct
+   problems weigh 1; an always-missed problem weighs ~3, so it shows up about
+   3x as often. We avoid repeating the immediately previous problem. */
+function pickWeighted(pool, stats, lastKey){
+  const w = new Array(pool.length);
+  let total = 0;
+  for (let i = 0; i < pool.length; i++){
+    const s = stats[pool[i].key];
+    let wt = 1;
+    if (s){
+      const att = s.correct + s.wrong;
+      if (att > 0) wt = 1 + MISTAKE_MAX_BOOST * (s.wrong / att);
+    }
+    w[i] = wt; total += wt;
+  }
+  for (let tries = 0; tries < 8; tries++){
+    let r = Math.random() * total, idx = 0;
+    for (let i = 0; i < pool.length; i++){ r -= w[i]; if (r <= 0){ idx = i; break; } }
+    if (pool.length === 1 || pool[idx].key !== lastKey) return pool[idx];
+  }
+  return pool[0];
+}
+
+function startSession(){
+  S = {
+    pool: buildPool(),
+    stats: load(K.stats, {}),
+    mode: prefs.mode,
+    op: prefs.op,
+    score: 0,            // first-attempt-correct count
+    answered: 0,         // problems completed
+    input: "",
+    current: null,
+    attemptWrong: false,
+    missed: new Set(),   // statKeys missed (first attempt) this session
+    startTs: Date.now(),
+    endTs: prefs.mode === "timed" ? Date.now() + TIMED_MS : null,
+    qIndex: 0,
+    timer: null
+  };
+  nextProblem();
+  el("scoreLabel").textContent = "0";
+  showView("drill");
+  renderDrill();
+  if (S.mode === "timed"){
+    updateTimer();
+    S.timer = setInterval(updateTimer, 200);
+  }
+}
+
+function nextProblem(){
+  const lastKey = S.current ? S.current.key : null;
+  const p = pickWeighted(S.pool, S.stats, lastKey);
+  S.current = { key:p.key, answer:p.answer, disp: OPS[S.op].display(p) };
+  S.input = "";
+  S.attemptWrong = false;
+}
+
+function renderDrill(){
+  el("problem").textContent = S.current.disp;
+  renderAnswer();
+  el("hint").innerHTML = S.attemptWrong ? `= ${S.current.answer}` : "&nbsp;";
+  if (S.mode === "fixed"){
+    el("status").classList.remove("timer","low");
+    el("status").textContent = `${S.qIndex + 1}/${FIXED_Q}`;
+  }
+}
+
+function renderAnswer(bad){
+  const a = el("answer");
+  a.className = "answerbox num" + (S.input === "" ? " empty" : "") + (bad ? " bad" : "");
+  a.textContent = S.input === "" ? (bad ? "" : "·") : S.input;
+  if (bad && S.input === "") a.textContent = "·";
+}
+
+function updateTimer(){
+  const left = Math.max(0, S.endTs - Date.now());
+  const secs = Math.ceil(left / 1000);
+  const st = el("status");
+  st.classList.add("timer");
+  st.classList.toggle("low", secs <= 10);
+  st.textContent = String(secs);
+  if (left <= 0) finish();
+}
+
+function press(d){
+  if (S.input.length >= 4) return;        // sanity cap (max answer 20*20=400)
+  S.input += d;
+  evaluate();
+}
+function backspace(){
+  S.input = S.input.slice(0, -1);
+  renderAnswer(false);
+  el("hint").innerHTML = S.attemptWrong ? `= ${S.current.answer}` : "&nbsp;";
+}
+
+function evaluate(){
+  const ans = String(S.current.answer);
+  if (S.input === ans){ onCorrect(); }
+  else if (S.input.length >= ans.length){ onWrong(); }
+  else { renderAnswer(false); }
+}
+
+function bumpStat(key, field){
+  const s = S.stats[key] || (S.stats[key] = { correct:0, wrong:0 });
+  s[field]++;
+  save(K.stats, S.stats);                  // persist immediately so misses survive a quit
+}
+
+function onCorrect(){
+  if (!S.attemptWrong){ bumpStat(S.current.key, "correct"); S.score++; el("scoreLabel").textContent = String(S.score); }
+  S.answered++;
+  advance();
+}
+
+function onWrong(){
+  if (!S.attemptWrong){
+    bumpStat(S.current.key, "wrong");
+    S.missed.add(S.current.key);
+    S.attemptWrong = true;
+  }
+  // show the correct answer as a reinforcement hint; user must type it to advance
+  el("hint").innerHTML = `= ${S.current.answer}`;
+  S.input = "";
+  renderAnswer(true);
+}
+
+function advance(){
+  if (S.mode === "fixed"){
+    S.qIndex++;
+    if (S.qIndex >= FIXED_Q){ finish(); return; }
+  }
+  nextProblem();
+  renderDrill();
+}
+
+function finish(){
+  if (S.timer){ clearInterval(S.timer); S.timer = null; }
+  const total  = S.mode === "timed" ? S.answered : FIXED_Q;
+  const timeMs = S.mode === "timed" ? TIMED_MS : (Date.now() - S.startTs);
+  const entry = {
+    ts: Date.now(), mode: S.mode, range: prefs.range, op: S.op,
+    score: S.score, total, timeMs
+  };
+  const hist = load(K.hist, []);
+  hist.unshift(entry);
+  if (hist.length > 10) hist.length = 10;
+  save(K.hist, hist);
+  renderResults(entry, [...S.missed]);
+  showView("results");
+}
+
+function quitDrill(){
+  if (S && S.timer){ clearInterval(S.timer); S.timer = null; }
+  // stats (incl. misses) were already persisted; a quit is not logged as a session
+  renderHome();
+  showView("home");
+}
+
+/* ============================ RESULTS ============================ */
+function renderResults(entry, missedKeys){
+  const acc = entry.total ? Math.round((entry.score / entry.total) * 100) : 0;
+  if (entry.mode === "timed"){
+    el("rBig").textContent = String(entry.score);
+    el("rLabel").textContent = "correct in 60 seconds";
+    el("rAcc").textContent = entry.total ? `${entry.score}/${entry.total} first try · ${acc}%` : "no answers";
+  } else {
+    el("rBig").textContent = fmtTime(entry.timeMs);
+    el("rLabel").textContent = "for 100 questions";
+    el("rAcc").textContent = `${entry.score}/100 first try · ${acc}%`;
+  }
+
+  const wrap = el("rMissed");
+  wrap.innerHTML = "";
+  if (!missedKeys.length){
+    wrap.innerHTML = '<span class="nomiss">None — clean run.</span>';
+  } else {
+    missedKeys.forEach(k => {
+      const span = document.createElement("span");
+      span.className = "miss num";
+      span.textContent = OPS[S.op].missLabel(k);
+      wrap.appendChild(span);
+    });
+  }
+}
+
+/* ============================ NAV / WIRING ============================ */
+function showView(name){
+  ["home","drill","results"].forEach(v => el(v).classList.toggle("active", v === name));
+}
+
+// number pad (event delegation)
+el("pad").addEventListener("click", e => {
+  const btn = e.target.closest("button[data-k]");
+  if (!btn) return;
+  const k = btn.dataset.k;
+  if (k === "back") backspace(); else press(k);
+});
+
+// physical keyboard (handy for desktop testing)
+document.addEventListener("keydown", e => {
+  if (!el("drill").classList.contains("active")) return;
+  if (e.key >= "0" && e.key <= "9") press(e.key);
+  else if (e.key === "Backspace") backspace();
+  else if (e.key === "Escape") quitDrill();
+});
+
+el("startBtn").addEventListener("click", startSession);
+el("quitBtn").addEventListener("click", quitDrill);
+el("rAgain").addEventListener("click", startSession);
+el("rHome").addEventListener("click", () => { renderHome(); showView("home"); });
+el("resetBtn").addEventListener("click", () => {
+  if (confirm("Clear all session history and mistake tracking?")){
+    save(K.stats, {});
+    save(K.hist, []);
+    renderHome();
+  }
+});
+
+// initial paint
+renderHome();
+
+// offline support
+if ("serviceWorker" in navigator){
+  window.addEventListener("load", () => navigator.serviceWorker.register("./sw.js").catch(()=>{}));
+}
+</script>
+</body>
+</html>
