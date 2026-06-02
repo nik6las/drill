@@ -88,7 +88,16 @@
   .answerbox{ font-size:clamp(2rem,12vw,4rem); font-weight:600; min-height:1.2em; line-height:1.2; color:var(--accent); }
   .answerbox.empty{ color:var(--line); }
   .answerbox.bad{ color:var(--wrong); }
-  .hint{ font-size:16px; color:var(--wrong); min-height:22px; font-weight:600; }
+  .hint{ font-size:clamp(1.1rem,5vw,1.6rem); color:var(--fg); min-height:1.4em; font-weight:700; }
+
+  .revealrow{ display:flex; justify-content:center; padding:2px 12px 6px; }
+  .showbtn{
+    border:1.5px solid var(--line); background:var(--bg); color:var(--muted);
+    border-radius:10px; padding:11px 22px; font-size:15px; font-weight:600;
+    cursor:pointer; touch-action:manipulation;
+  }
+  .showbtn:active{ background:var(--btn); }
+  .showbtn.hidden{ visibility:hidden; }
 
   .pad{
     display:grid; grid-template-columns:repeat(3,1fr); gap:8px;
@@ -159,6 +168,10 @@
       <div class="problem num" id="problem">&nbsp;</div>
       <div class="answerbox num empty" id="answer">&nbsp;</div>
       <div class="hint num" id="hint">&nbsp;</div>
+    </div>
+
+    <div class="revealrow">
+      <button class="showbtn" id="showBtn">Show answer</button>
     </div>
 
     <div class="pad" id="pad">
@@ -283,12 +296,39 @@ const OP_NAMES = { mul:"Multiply", div:"Divide", pct:"Percent", frac:"Fraction" 
 
 const RANGES = { "1-10":[1,10], "1-12":[1,12], "1-15":[1,15], "1-20":[1,20] };
 const RANGE_ORDER = ["1-10","1-12","1-15","1-20"];
-const MODES = { timed:"Timed 60s", fixed:"100 questions" };
-const MODE_ORDER = ["timed","fixed"];
+/* A mode pairs two INDEPENDENT axes:
+     format    -> session shape: "timed" (60s, count correct) or "fixed" (100q, time it)
+     selection -> how problems are drawn: a key into SELECT (weight functions)
+   This keeps "what scores/ends a session" separate from "which problems appear",
+   so e.g. a fixed-focus mode later is a one-line addition, not a refactor. */
+const MODES = {
+  timed: { label:"Timed", format:"timed", selection:"normal" },
+  fixed: { label:"Fixed", format:"fixed", selection:"normal" },
+  focus: { label:"Focus", format:"timed", selection:"focus"  }
+};
+const MODE_ORDER = ["timed","fixed","focus"];
 
 const TIMED_MS = 60000;
 const FIXED_Q  = 100;
-const MISTAKE_MAX_BOOST = 2;   // weight = 1 + 2*missRate  ->  up to ~3x for always-missed
+const MISTAKE_MAX_BOOST = 2;   // normal weight = 1 + 2*missRate -> up to ~3x for always-missed
+
+function missRate(s){
+  if (!s) return 0;
+  const att = s.correct + s.wrong;
+  return att > 0 ? s.wrong / att : 0;
+}
+
+/* SELECT: per-problem weight functions, chosen by a mode's `selection`.
+     normal -> gentle 1..3 nudge toward missed facts, full coverage.
+     focus  -> missed facts dominate by volume x rate; clean facts keep a small
+               0.2 floor so you still get coverage and can confirm fixes.
+   Both degrade gracefully: with zero recorded misses, weights flatten and the
+   draw is effectively uniform random (no empty-mode edge case). */
+const SELECT = {
+  normal: (p, s) => 1 + MISTAKE_MAX_BOOST * missRate(s),
+  focus:  (p, s) => 0.2 + (s ? s.wrong * (1 + missRate(s)) : 0)
+};
+function modeFormat(key){ return MODES[key] ? MODES[key].format : (key === "fixed" ? "fixed" : "timed"); }
 
 /* ---------------- preferences ---------------- */
 let prefs = load(K.prefs, { range:"1-12", mode:"timed", op:"mul" });
@@ -318,7 +358,8 @@ function renderChips(containerId, order, labelMap, selectedKey, onPick){
 function renderHome(){
   const rangeLabels = {}; RANGE_ORDER.forEach(r => rangeLabels[r] = r.replace("-","–"));
   renderChips("rangeChips", RANGE_ORDER, rangeLabels, prefs.range, k => { prefs.range = k; save(K.prefs, prefs); renderHome(); });
-  renderChips("modeChips", MODE_ORDER, { timed:"Timed", fixed:"Fixed 100" }, prefs.mode, k => { prefs.mode = k; save(K.prefs, prefs); renderHome(); });
+  const modeLabels = {}; MODE_ORDER.forEach(m => modeLabels[m] = MODES[m].label);
+  renderChips("modeChips", MODE_ORDER, modeLabels, prefs.mode, k => { prefs.mode = k; save(K.prefs, prefs); renderHome(); });
   renderHistory();
 }
 
@@ -339,7 +380,8 @@ function renderHistory(){
     const row = document.createElement("div");
     row.className = "histrow";
     const range = h.range.replace("-","–");
-    const result = h.mode === "timed" ? `${h.score} correct` : fmtTime(h.timeMs);
+    const fmt = h.format || modeFormat(h.mode);
+    const result = fmt === "timed" ? `${h.score} correct` : fmtTime(h.timeMs);
     row.innerHTML =
       `<span class="meta num">${fmtDate(h.ts)} · ${range} · ${h.mode}</span>` +
       `<span class="res num">${result}</span>`;
@@ -353,22 +395,20 @@ function buildPool(){
   return OPS[prefs.op].enumerate(mn, mx);
 }
 
-/* Weighted draw: a problem's weight is 1 + 2*missRate, where missRate is the
-   share of past first-attempts that were wrong. Never-seen / always-correct
-   problems weigh 1; an always-missed problem weighs ~3, so it shows up about
-   3x as often. We avoid repeating the immediately previous problem. */
-function pickWeighted(pool, stats, lastKey){
+/* Weighted draw. The weight function is chosen by the mode's `selection`
+   (see SELECT). If every weight comes out 0 (e.g. focus with no misses yet),
+   we fall back to uniform so the draw never stalls. The immediately previous
+   problem is never repeated. */
+function pickWeighted(pool, stats, lastKey, selection){
+  const wf = SELECT[selection] || SELECT.normal;
   const w = new Array(pool.length);
   let total = 0;
   for (let i = 0; i < pool.length; i++){
-    const s = stats[pool[i].key];
-    let wt = 1;
-    if (s){
-      const att = s.correct + s.wrong;
-      if (att > 0) wt = 1 + MISTAKE_MAX_BOOST * (s.wrong / att);
-    }
+    let wt = wf(pool[i], stats[pool[i].key]);
+    if (!(wt > 0)) wt = 0;                 // guard NaN / negatives
     w[i] = wt; total += wt;
   }
+  if (total <= 0){ for (let i = 0; i < pool.length; i++) w[i] = 1; total = pool.length; }
   for (let tries = 0; tries < 8; tries++){
     let r = Math.random() * total, idx = 0;
     for (let i = 0; i < pool.length; i++){ r -= w[i]; if (r <= 0){ idx = i; break; } }
@@ -378,19 +418,23 @@ function pickWeighted(pool, stats, lastKey){
 }
 
 function startSession(){
+  const m = MODES[prefs.mode] || MODES.timed;
   S = {
     pool: buildPool(),
     stats: load(K.stats, {}),
     mode: prefs.mode,
+    format: m.format,        // "timed" | "fixed"
+    selection: m.selection,  // key into SELECT
     op: prefs.op,
     score: 0,            // first-attempt-correct count
     answered: 0,         // problems completed
     input: "",
     current: null,
     attemptWrong: false,
+    revealed: false,
     missed: new Set(),   // statKeys missed (first attempt) this session
     startTs: Date.now(),
-    endTs: prefs.mode === "timed" ? Date.now() + TIMED_MS : null,
+    endTs: m.format === "timed" ? Date.now() + TIMED_MS : null,
     qIndex: 0,
     timer: null
   };
@@ -398,7 +442,7 @@ function startSession(){
   el("scoreLabel").textContent = "0";
   showView("drill");
   renderDrill();
-  if (S.mode === "timed"){
+  if (S.format === "timed"){
     updateTimer();
     S.timer = setInterval(updateTimer, 200);
   }
@@ -406,17 +450,19 @@ function startSession(){
 
 function nextProblem(){
   const lastKey = S.current ? S.current.key : null;
-  const p = pickWeighted(S.pool, S.stats, lastKey);
+  const p = pickWeighted(S.pool, S.stats, lastKey, S.selection);
   S.current = { key:p.key, answer:p.answer, disp: OPS[S.op].display(p) };
   S.input = "";
   S.attemptWrong = false;
+  S.revealed = false;
 }
 
 function renderDrill(){
   el("problem").textContent = S.current.disp;
   renderAnswer();
-  el("hint").innerHTML = S.attemptWrong ? `= ${S.current.answer}` : "&nbsp;";
-  if (S.mode === "fixed"){
+  el("hint").innerHTML = S.revealed ? `= ${S.current.answer}` : "&nbsp;";
+  el("showBtn").classList.toggle("hidden", S.revealed);
+  if (S.format === "fixed"){
     el("status").classList.remove("timer","low");
     el("status").textContent = `${S.qIndex + 1}/${FIXED_Q}`;
   }
@@ -447,7 +493,7 @@ function press(d){
 function backspace(){
   S.input = S.input.slice(0, -1);
   renderAnswer(false);
-  el("hint").innerHTML = S.attemptWrong ? `= ${S.current.answer}` : "&nbsp;";
+  el("hint").innerHTML = S.revealed ? `= ${S.current.answer}` : "&nbsp;";
 }
 
 function evaluate(){
@@ -470,19 +516,33 @@ function onCorrect(){
 }
 
 function onWrong(){
+  // a wrong guess counts as a miss (first attempt only) but does NOT reveal;
+  // clear and let them retry. Revealing is opt-in via the Show answer button.
   if (!S.attemptWrong){
     bumpStat(S.current.key, "wrong");
     S.missed.add(S.current.key);
     S.attemptWrong = true;
   }
-  // show the correct answer as a reinforcement hint; user must type it to advance
-  el("hint").innerHTML = `= ${S.current.answer}`;
   S.input = "";
   renderAnswer(true);
 }
 
+function showAnswer(){
+  // blanking counts as a miss too (guarded so a prior wrong guess isn't double-counted)
+  if (!S.attemptWrong){
+    bumpStat(S.current.key, "wrong");
+    S.missed.add(S.current.key);
+    S.attemptWrong = true;
+  }
+  S.revealed = true;
+  S.input = "";
+  el("hint").innerHTML = `= ${S.current.answer}`;
+  el("showBtn").classList.add("hidden");
+  renderAnswer(false);   // user types the revealed answer to advance
+}
+
 function advance(){
-  if (S.mode === "fixed"){
+  if (S.format === "fixed"){
     S.qIndex++;
     if (S.qIndex >= FIXED_Q){ finish(); return; }
   }
@@ -492,10 +552,10 @@ function advance(){
 
 function finish(){
   if (S.timer){ clearInterval(S.timer); S.timer = null; }
-  const total  = S.mode === "timed" ? S.answered : FIXED_Q;
-  const timeMs = S.mode === "timed" ? TIMED_MS : (Date.now() - S.startTs);
+  const total  = S.format === "timed" ? S.answered : FIXED_Q;
+  const timeMs = S.format === "timed" ? TIMED_MS : (Date.now() - S.startTs);
   const entry = {
-    ts: Date.now(), mode: S.mode, range: prefs.range, op: S.op,
+    ts: Date.now(), mode: S.mode, format: S.format, range: prefs.range, op: S.op,
     score: S.score, total, timeMs
   };
   const hist = load(K.hist, []);
@@ -516,9 +576,9 @@ function quitDrill(){
 /* ============================ RESULTS ============================ */
 function renderResults(entry, missedKeys){
   const acc = entry.total ? Math.round((entry.score / entry.total) * 100) : 0;
-  if (entry.mode === "timed"){
+  if (entry.format === "timed"){
     el("rBig").textContent = String(entry.score);
-    el("rLabel").textContent = "correct in 60 seconds";
+    el("rLabel").textContent = entry.mode === "focus" ? "correct in 60 seconds (focus)" : "correct in 60 seconds";
     el("rAcc").textContent = entry.total ? `${entry.score}/${entry.total} first try · ${acc}%` : "no answers";
   } else {
     el("rBig").textContent = fmtTime(entry.timeMs);
@@ -526,6 +586,7 @@ function renderResults(entry, missedKeys){
     el("rAcc").textContent = `${entry.score}/100 first try · ${acc}%`;
   }
 
+  const label = OPS[entry.op] ? OPS[entry.op].missLabel : OPS.mul.missLabel;
   const wrap = el("rMissed");
   wrap.innerHTML = "";
   if (!missedKeys.length){
@@ -534,7 +595,7 @@ function renderResults(entry, missedKeys){
     missedKeys.forEach(k => {
       const span = document.createElement("span");
       span.className = "miss num";
-      span.textContent = OPS[S.op].missLabel(k);
+      span.textContent = label(k);
       wrap.appendChild(span);
     });
   }
@@ -559,7 +620,10 @@ document.addEventListener("keydown", e => {
   if (e.key >= "0" && e.key <= "9") press(e.key);
   else if (e.key === "Backspace") backspace();
   else if (e.key === "Escape") quitDrill();
+  else if (e.key === "?" || e.key === "/") showAnswer();
 });
+
+el("showBtn").addEventListener("click", showAnswer);
 
 el("startBtn").addEventListener("click", startSession);
 el("quitBtn").addEventListener("click", quitDrill);
