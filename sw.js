@@ -1,5 +1,9 @@
-/* Offline cache. Bump CACHE when you change any file, so clients update. */
-const CACHE = "mathdrill-v1";
+/* Offline cache.
+   - Page/navigation requests: network-first (always get latest deploy when
+     online, fall back to cache when offline) -> no more stale-update surprises.
+   - Static assets (icons, manifest): cache-first.
+   Bump CACHE whenever you want to force-drop old cached assets. */
+const CACHE = "mathdrill-v2";
 const ASSETS = [
   "./",
   "./index.html",
@@ -22,12 +26,30 @@ self.addEventListener("activate", e => {
 });
 
 self.addEventListener("fetch", e => {
-  if (e.request.method !== "GET") return;
+  const req = e.request;
+  if (req.method !== "GET") return;
+
+  const isPage = req.mode === "navigate" ||
+                 (req.headers.get("accept") || "").includes("text/html");
+
+  if (isPage){
+    // network-first: fresh HTML when online, cached HTML when offline
+    e.respondWith(
+      fetch(req).then(res => {
+        const copy = res.clone();
+        caches.open(CACHE).then(c => c.put("./index.html", copy)).catch(()=>{});
+        return res;
+      }).catch(() => caches.match(req).then(hit => hit || caches.match("./index.html")))
+    );
+    return;
+  }
+
+  // cache-first for everything else
   e.respondWith(
-    caches.match(e.request).then(hit => hit || fetch(e.request).then(res => {
+    caches.match(req).then(hit => hit || fetch(req).then(res => {
       const copy = res.clone();
-      caches.open(CACHE).then(c => c.put(e.request, copy)).catch(()=>{});
+      caches.open(CACHE).then(c => c.put(req, copy)).catch(()=>{});
       return res;
-    }).catch(() => caches.match("./index.html")))
+    }))
   );
 });
