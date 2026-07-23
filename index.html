@@ -64,6 +64,35 @@
     cursor:pointer; touch-action:manipulation; margin-top:6px;
   }
   .start:active{ filter:brightness(.92); }
+  .start:disabled{ opacity:.38; cursor:default; filter:none; }
+
+  .factsrow{ display:flex; align-items:center; gap:10px; margin-bottom:24px; }
+  .factsum{ flex:1; font-size:16px; font-weight:600; }
+  .factsum.none{ color:var(--wrong); }
+  .gear{
+    flex:none; width:48px; height:48px; border:1.5px solid var(--line);
+    background:var(--bg); border-radius:12px; font-size:19px; line-height:1;
+    cursor:pointer; touch-action:manipulation;
+  }
+  .gear:active{ background:var(--btn); }
+
+  /* ---------------- SETTINGS ---------------- */
+  #settings{ padding-top:max(10px,env(safe-area-inset-top)); }
+  .setbody{ flex:1; min-height:0; overflow-y:auto; padding:0 14px 8px; }
+  .setfoot{ padding:8px 14px calc(12px + env(safe-area-inset-bottom)); }
+  .hintline{ font-size:13px; color:var(--muted); margin:0 0 10px; }
+  .fgrid{ display:grid; grid-template-columns:repeat(16,1fr); gap:2px; }
+  .fcell{
+    aspect-ratio:1; padding:0; border:none; border-radius:3px;
+    background:var(--btn); cursor:pointer; touch-action:manipulation;
+  }
+  .fcell.on{ background:var(--accent); }
+  .fhead, .fcorner{
+    aspect-ratio:1; padding:0; border:none; background:none; color:var(--muted);
+    font-size:clamp(9px,2.6vw,13px); font-weight:700; cursor:pointer;
+    touch-action:manipulation; display:flex; align-items:center; justify-content:center;
+  }
+  .fhead:active, .fcorner:active{ color:var(--accent); }
 
   .hist{ margin-top:34px; }
   .hist h2{ font-size:12px; font-weight:700; letter-spacing:.12em; text-transform:uppercase; color:var(--muted); margin:0 0 6px; }
@@ -138,8 +167,11 @@
   <section id="home" class="view active">
     <div class="brand">Drill</div>
 
-    <div class="grouplabel">Range</div>
-    <div class="chips" id="rangeChips"></div>
+    <div class="grouplabel">Facts</div>
+    <div class="factsrow">
+      <div class="factsum num" id="factSummary"></div>
+      <button class="gear" id="gearBtn" aria-label="Edit facts">&#9881;</button>
+    </div>
 
     <div class="grouplabel">Mode</div>
     <div class="chips" id="modeChips"></div>
@@ -153,6 +185,28 @@
 
     <div class="footer">
       <button class="reset" id="resetBtn">Clear history &amp; mistakes</button>
+    </div>
+  </section>
+
+  <!-- ================= SETTINGS ================= -->
+  <section id="settings" class="view">
+    <div class="bar">
+      <button class="quit" id="setBack" aria-label="Back">&#8592;</button>
+      <div class="status num" id="setCount">0</div>
+      <div class="score">&nbsp;</div>
+    </div>
+
+    <div class="setbody">
+      <div class="grouplabel">Presets</div>
+      <div class="chips" id="presetChips"></div>
+
+      <div class="grouplabel">Facts</div>
+      <p class="hintline">Tap a cell to toggle one fact. Tap a row or column number to toggle the whole line, or &times; to select all / clear.</p>
+      <div class="fgrid" id="fgrid"></div>
+    </div>
+
+    <div class="setfoot">
+      <button class="start" id="setDone">Done</button>
     </div>
   </section>
 
@@ -273,7 +327,10 @@ const OPS = {
     missLabel(key){
       const [a,b] = key.slice(4).split("x");
       return `${a} × ${b}`;
-    }
+    },
+    // which grid coordinates this problem occupies, so fact selection stays
+    // op-agnostic (a future op maps its own operands onto the same grid)
+    pairOf(p){ return [p.a, p.b]; }
   }
 
   /* Example of a future, non-commutative operation:
@@ -294,8 +351,20 @@ const OPS = {
 const OP_ORDER = ["mul"];                 // operations exposed in the UI, in order
 const OP_NAMES = { mul:"Multiply", div:"Divide", pct:"Percent", frac:"Fraction" };
 
-const RANGES = { "1-10":[1,10], "1-12":[1,12], "1-15":[1,15], "1-20":[1,20] };
-const RANGE_ORDER = ["1-10","1-12","1-15","1-20"];
+/* Facts are chosen individually on a MAX x MAX grid rather than by range.
+   Multiplication is commutative, so a fact is canonicalised to a<=b ("7x8");
+   the grid simply paints both mirror cells from that one key. */
+const MAX = 15;
+const N_FACTS = (MAX * (MAX + 1)) / 2;
+const PRESETS = { "1-10":10, "1-12":12, "1-15":15 };
+const PRESET_ORDER = ["1-10","1-12","1-15"];
+
+const pairKey = (a,b) => a <= b ? `${a}x${b}` : `${b}x${a}`;
+function presetFacts(hi){
+  const out = [];
+  for (let i = 1; i <= hi; i++) for (let j = i; j <= hi; j++) out.push(`${i}x${j}`);
+  return out;
+}
 /* A mode pairs two INDEPENDENT axes:
      format    -> session shape: "timed" (60s, count correct) or "fixed" (100q, time it)
      selection -> how problems are drawn: a key into SELECT (weight functions)
@@ -331,10 +400,38 @@ const SELECT = {
 function modeFormat(key){ return MODES[key] ? MODES[key].format : (key === "fixed" ? "fixed" : "timed"); }
 
 /* ---------------- preferences ---------------- */
-let prefs = load(K.prefs, { range:"1-12", mode:"timed", op:"mul" });
-if (!RANGES[prefs.range]) prefs.range = "1-12";
-if (!MODES[prefs.mode])  prefs.mode  = "timed";
-if (!OPS[prefs.op])      prefs.op    = "mul";
+let prefs = load(K.prefs, {});
+if (!MODES[prefs.mode]) prefs.mode = "timed";
+if (!OPS[prefs.op])     prefs.op   = "mul";
+
+/* Migration: v1 prefs stored a fixed {range:"1-12"}. Convert it once into an
+   equivalent explicit selection, clamped to the grid. Stats/history keep their
+   own schema and are deliberately untouched. */
+if (!Array.isArray(prefs.facts)){
+  const hi = Math.min(parseInt(String(prefs.range || "1-12").split("-")[1], 10) || 12, MAX);
+  prefs.facts = presetFacts(hi);
+}
+delete prefs.range;
+
+const facts = new Set(prefs.facts.filter(k => {
+  const [a,b] = String(k).split("x").map(Number);
+  return a >= 1 && b >= a && b <= MAX;
+}));
+function saveFacts(){ prefs.facts = [...facts]; save(K.prefs, prefs); }
+saveFacts();
+
+/* If the selection is exactly a preset, name it; otherwise it's custom. */
+function presetMatch(){
+  for (const k of PRESET_ORDER){
+    const f = presetFacts(PRESETS[k]);
+    if (facts.size === f.length && f.every(x => facts.has(x))) return k;
+  }
+  return null;
+}
+function selectionLabel(){
+  const m = presetMatch();
+  return m ? m : `${facts.size} facts`;
+}
 
 /* ---------------- session state ---------------- */
 let S = null;
@@ -356,9 +453,15 @@ function renderChips(containerId, order, labelMap, selectedKey, onPick){
 }
 
 function renderHome(){
-  const rangeLabels = {}; RANGE_ORDER.forEach(r => rangeLabels[r] = r.replace("-","–"));
-  renderChips("rangeChips", RANGE_ORDER, rangeLabels, prefs.range, k => { prefs.range = k; save(K.prefs, prefs); renderHome(); });
-  const modeLabels = {}; MODE_ORDER.forEach(m => modeLabels[m] = MODES[m].label);
+  const sum = el("factSummary");
+  const m = presetMatch();
+  sum.classList.toggle("none", facts.size === 0);
+  sum.textContent = facts.size === 0
+    ? "No facts selected"
+    : `${facts.size} facts · ${m ? m.replace("-","–") : "custom"}`;
+  el("startBtn").disabled = facts.size === 0;
+
+  const modeLabels = {}; MODE_ORDER.forEach(m2 => modeLabels[m2] = MODES[m2].label);
   renderChips("modeChips", MODE_ORDER, modeLabels, prefs.mode, k => { prefs.mode = k; save(K.prefs, prefs); renderHome(); });
   renderHistory();
 }
@@ -391,8 +494,11 @@ function renderHistory(){
 
 /* ============================ DRILL ============================ */
 function buildPool(){
-  const [mn, mx] = RANGES[prefs.range];
-  return OPS[prefs.op].enumerate(mn, mx);
+  const op = OPS[prefs.op];
+  return op.enumerate(1, MAX).filter(p => {
+    const [a,b] = op.pairOf(p);
+    return facts.has(pairKey(a,b));
+  });
 }
 
 /* Weighted draw. The weight function is chosen by the mode's `selection`
@@ -555,7 +661,7 @@ function finish(){
   const total  = S.format === "timed" ? S.answered : FIXED_Q;
   const timeMs = S.format === "timed" ? TIMED_MS : (Date.now() - S.startTs);
   const entry = {
-    ts: Date.now(), mode: S.mode, format: S.format, range: prefs.range, op: S.op,
+    ts: Date.now(), mode: S.mode, format: S.format, range: selectionLabel(), op: S.op,
     score: S.score, total, timeMs
   };
   const hist = load(K.hist, []);
@@ -601,9 +707,85 @@ function renderResults(entry, missedKeys){
   }
 }
 
+/* ============================ SETTINGS ============================ */
+/* The grid is built once; selection changes only repaint classes. Cells are
+   painted from the canonical a<=b key, so both mirror halves stay in sync
+   without any extra bookkeeping. */
+function buildGrid(){
+  const g = el("fgrid");
+  g.innerHTML = "";
+
+  const corner = document.createElement("button");
+  corner.className = "fcorner"; corner.id = "fAll";
+  corner.textContent = "×";
+  corner.setAttribute("aria-label", "Select all or clear");
+  g.appendChild(corner);
+
+  for (let c = 1; c <= MAX; c++){
+    const h = document.createElement("button");
+    h.className = "fhead num"; h.textContent = c; h.dataset.line = c;
+    h.setAttribute("aria-label", `Toggle column ${c}`);
+    g.appendChild(h);
+  }
+  for (let r = 1; r <= MAX; r++){
+    const h = document.createElement("button");
+    h.className = "fhead num"; h.textContent = r; h.dataset.line = r;
+    h.setAttribute("aria-label", `Toggle row ${r}`);
+    g.appendChild(h);
+    for (let c = 1; c <= MAX; c++){
+      const b = document.createElement("button");
+      b.className = "fcell"; b.dataset.r = r; b.dataset.c = c;
+      b.setAttribute("aria-label", `${r} × ${c}`);
+      g.appendChild(b);
+    }
+  }
+}
+
+function paintGrid(){
+  el("fgrid").querySelectorAll(".fcell").forEach(b => {
+    b.classList.toggle("on", facts.has(pairKey(+b.dataset.r, +b.dataset.c)));
+  });
+  el("setCount").textContent = String(facts.size);
+  const presetLabels = {}; PRESET_ORDER.forEach(k => presetLabels[k] = k.replace("-","–"));
+  renderChips("presetChips", PRESET_ORDER, presetLabels, presetMatch(), k => {
+    facts.clear();
+    presetFacts(PRESETS[k]).forEach(f => facts.add(f));
+    saveFacts(); paintGrid();
+  });
+}
+
+function lineKeys(n){
+  const out = [];
+  for (let i = 1; i <= MAX; i++) out.push(pairKey(n, i));
+  return out;
+}
+
+el("fgrid").addEventListener("click", e => {
+  const cell = e.target.closest(".fcell");
+  if (cell){
+    const k = pairKey(+cell.dataset.r, +cell.dataset.c);
+    facts.has(k) ? facts.delete(k) : facts.add(k);
+  } else if (e.target.closest("#fAll")){
+    // all -> none, anything else -> all
+    if (facts.size === N_FACTS) facts.clear();
+    else presetFacts(MAX).forEach(f => facts.add(f));
+  } else {
+    const h = e.target.closest(".fhead");
+    if (!h) return;
+    const ks = lineKeys(+h.dataset.line);
+    const full = ks.every(k => facts.has(k));
+    ks.forEach(k => full ? facts.delete(k) : facts.add(k));
+  }
+  saveFacts();
+  paintGrid();
+});
+
+function openSettings(){ paintGrid(); showView("settings"); }
+function closeSettings(){ renderHome(); showView("home"); }
+
 /* ============================ NAV / WIRING ============================ */
 function showView(name){
-  ["home","drill","results"].forEach(v => el(v).classList.toggle("active", v === name));
+  ["home","settings","drill","results"].forEach(v => el(v).classList.toggle("active", v === name));
 }
 
 // number pad (event delegation)
@@ -625,7 +807,10 @@ document.addEventListener("keydown", e => {
 
 el("showBtn").addEventListener("click", showAnswer);
 
-el("startBtn").addEventListener("click", startSession);
+el("startBtn").addEventListener("click", () => { if (facts.size) startSession(); });
+el("gearBtn").addEventListener("click", openSettings);
+el("setBack").addEventListener("click", closeSettings);
+el("setDone").addEventListener("click", closeSettings);
 el("quitBtn").addEventListener("click", quitDrill);
 el("rAgain").addEventListener("click", startSession);
 el("rHome").addEventListener("click", () => { renderHome(); showView("home"); });
@@ -638,6 +823,7 @@ el("resetBtn").addEventListener("click", () => {
 });
 
 // initial paint
+buildGrid();
 renderHome();
 
 // offline support
