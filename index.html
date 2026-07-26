@@ -138,7 +138,9 @@
     height:clamp(58px,9.5vh,82px); cursor:pointer; touch-action:manipulation;
   }
   .key:active{ background:var(--btn-active); }
-  .key.spacer{ background:none; cursor:default; }
+  .key.op{ background:none; color:var(--accent); font-size:1.6rem; }
+  .key.op:active{ background:var(--btn); }
+  .key.op.hidden{ visibility:hidden; }
   .key.back{ font-size:1.6rem; }
 
   /* ---------------- RESULTS ---------------- */
@@ -166,6 +168,9 @@
   <!-- ================= HOME ================= -->
   <section id="home" class="view active">
     <div class="brand">Drill</div>
+
+    <div class="grouplabel">Drill</div>
+    <div class="chips" id="opChips"></div>
 
     <div class="grouplabel">Facts</div>
     <div class="factsrow">
@@ -238,7 +243,7 @@
       <button class="key num" data-k="7">7</button>
       <button class="key num" data-k="8">8</button>
       <button class="key num" data-k="9">9</button>
-      <button class="key spacer" disabled></button>
+      <button class="key op" id="opKey" data-k="next" aria-label="Next factor">&times;</button>
       <button class="key num" data-k="0">0</button>
       <button class="key back" data-k="back" aria-label="Delete">&#9003;</button>
     </div>
@@ -330,7 +335,61 @@ const OPS = {
     },
     // which grid coordinates this problem occupies, so fact selection stays
     // op-agnostic (a future op maps its own operands onto the same grid)
-    pairOf(p){ return [p.a, p.b]; }
+    pairOf(p){ return [p.a, p.b]; },
+
+    /* ---- answer model ----
+       slots  : how many numbers the user enters
+       maxLen : digit cap per slot
+       check  : "correct" | "wrong" | "pending", called after every keypress
+       reveal : what "Show answer" displays AND what the user must type back */
+    slots: 1,
+    maxLen: [4],
+    check(slots, cur){
+      const ans = String(cur.answer), v = slots[0];
+      if (v === ans) return "correct";
+      if (v.length >= ans.length) return "wrong";
+      return "pending";
+    },
+    reveal(cur){ return String(cur.answer); }
+  },
+
+  /* Factor recall: shown a product, enter the two factors (smaller first).
+     A product can have several factorisations, so `pairs` carries every
+     SELECTED pair for that product and any one of them is accepted. Stats key
+     on the product, so the tracker learns "slow to decompose 56", and the
+     `fac:` prefix keeps this pool fully independent of `mul:`. */
+  fac: {
+    symbol: "×",
+    enumerate(min, max){
+      const out = [];
+      for (let i = min; i <= max; i++)
+        for (let j = i; j <= max; j++)
+          out.push({ a:i, b:j, answer:i*j, key:`fac:${i*j}` });
+      return out;
+    },
+    display(p){ return String(p.answer); },
+    missLabel(key){ return key.slice(4); },
+    pairOf(p){ return [p.a, p.b]; },
+
+    slots: 2,
+    maxLen: [2, 2],
+    check(slots, cur){
+      const [sa, sb] = slots;
+      if (sa === "") return "pending";
+      const a = Number(sa);
+      // every partner of `a` among this product's selected pairs
+      const partners = [];
+      cur.pairs.forEach(([x,y]) => {
+        if (x === a) partners.push(y);
+        else if (y === a) partners.push(x);
+      });
+      if (!partners.length) return sb === "" ? "pending" : "wrong";
+      if (sb === "") return "pending";
+      if (partners.some(v => String(v) === sb)) return "correct";
+      if (partners.some(v => String(v).startsWith(sb))) return "pending";
+      return "wrong";
+    },
+    reveal(cur){ const [a,b] = cur.pairs[0]; return `${a} × ${b}`; }
   }
 
   /* Example of a future, non-commutative operation:
@@ -348,8 +407,8 @@ const OPS = {
   }
   */
 };
-const OP_ORDER = ["mul"];                 // operations exposed in the UI, in order
-const OP_NAMES = { mul:"Multiply", div:"Divide", pct:"Percent", frac:"Fraction" };
+const OP_ORDER = ["mul","fac"];           // operations exposed in the UI, in order
+const OP_NAMES = { mul:"Multiply", fac:"Factor", div:"Divide", pct:"Percent", frac:"Fraction" };
 
 /* Facts are chosen individually on a MAX x MAX grid rather than by range.
    Multiplication is commutative, so a fact is canonicalised to a<=b ("7x8");
@@ -371,9 +430,9 @@ function presetFacts(hi){
    This keeps "what scores/ends a session" separate from "which problems appear",
    so e.g. a fixed-focus mode later is a one-line addition, not a refactor. */
 const MODES = {
-  timed: { label:"Timed", format:"timed", selection:"normal" },
-  fixed: { label:"Fixed", format:"fixed", selection:"normal" },
-  focus: { label:"Focus", format:"timed", selection:"focus"  }
+  timed: { label:"Timed", format:"timed", selection:"normal"  },
+  fixed: { label:"Fixed", format:"fixed", selection:"uniform" },
+  focus: { label:"Focus", format:"timed", selection:"focus"   }
 };
 const MODE_ORDER = ["timed","fixed","focus"];
 
@@ -388,14 +447,18 @@ function missRate(s){
 }
 
 /* SELECT: per-problem weight functions, chosen by a mode's `selection`.
-     normal -> gentle 1..3 nudge toward missed facts, full coverage.
-     focus  -> missed facts dominate by volume x rate; clean facts keep a small
-               0.2 floor so you still get coverage and can confirm fixes.
-   Both degrade gracefully: with zero recorded misses, weights flatten and the
-   draw is effectively uniform random (no empty-mode edge case). */
+     uniform -> flat draw over the selected pool; history is ignored entirely.
+                Used by Fixed so a 100-question run is a stable benchmark that
+                doesn't drift as the mistake log fills up.
+     normal  -> gentle 1..3 nudge toward missed facts, full coverage.
+     focus   -> missed facts dominate by volume x rate; clean facts keep a small
+                0.2 floor so you still get coverage and can confirm fixes.
+   normal/focus degrade gracefully: with zero recorded misses their weights
+   flatten and the draw collapses to uniform (no empty-mode edge case). */
 const SELECT = {
-  normal: (p, s) => 1 + MISTAKE_MAX_BOOST * missRate(s),
-  focus:  (p, s) => 0.2 + (s ? s.wrong * (1 + missRate(s)) : 0)
+  uniform: () => 1,
+  normal:  (p, s) => 1 + MISTAKE_MAX_BOOST * missRate(s),
+  focus:   (p, s) => 0.2 + (s ? s.wrong * (1 + missRate(s)) : 0)
 };
 function modeFormat(key){ return MODES[key] ? MODES[key].format : (key === "fixed" ? "fixed" : "timed"); }
 
@@ -461,6 +524,8 @@ function renderHome(){
     : `${facts.size} facts · ${m ? m.replace("-","–") : "custom"}`;
   el("startBtn").disabled = facts.size === 0;
 
+  renderChips("opChips", OP_ORDER, OP_NAMES, prefs.op, k => { prefs.op = k; save(K.prefs, prefs); renderHome(); });
+
   const modeLabels = {}; MODE_ORDER.forEach(m2 => modeLabels[m2] = MODES[m2].label);
   renderChips("modeChips", MODE_ORDER, modeLabels, prefs.mode, k => { prefs.mode = k; save(K.prefs, prefs); renderHome(); });
   renderHistory();
@@ -486,7 +551,7 @@ function renderHistory(){
     const fmt = h.format || modeFormat(h.mode);
     const result = fmt === "timed" ? `${h.score} correct` : fmtTime(h.timeMs);
     row.innerHTML =
-      `<span class="meta num">${fmtDate(h.ts)} · ${range} · ${h.mode}</span>` +
+      `<span class="meta num">${fmtDate(h.ts)} · ${OP_NAMES[h.op] || "Multiply"} · ${range}</span>` +
       `<span class="res num">${result}</span>`;
     list.appendChild(row);
   });
@@ -499,6 +564,19 @@ function buildPool(){
     const [a,b] = op.pairOf(p);
     return facts.has(pairKey(a,b));
   });
+}
+
+/* key -> [[a,b],...] over the SELECTED pool. For factoring this is the set of
+   accepted answers per product; several pool entries share one key (12 arrives
+   from 2x6 and 3x4), which also makes ambiguous products appear proportionally
+   more often. */
+function indexPairs(pool, op){
+  const m = new Map();
+  pool.forEach(p => {
+    const arr = m.get(p.key) || m.set(p.key, []).get(p.key);
+    arr.push(op.pairOf(p));
+  });
+  return m;
 }
 
 /* Weighted draw. The weight function is chosen by the mode's `selection`
@@ -525,8 +603,10 @@ function pickWeighted(pool, stats, lastKey, selection){
 
 function startSession(){
   const m = MODES[prefs.mode] || MODES.timed;
+  const pool0 = buildPool();
   S = {
-    pool: buildPool(),
+    pool: pool0,
+    pairs: indexPairs(pool0, OPS[prefs.op]),
     stats: load(K.stats, {}),
     mode: prefs.mode,
     format: m.format,        // "timed" | "fixed"
@@ -534,7 +614,8 @@ function startSession(){
     op: prefs.op,
     score: 0,            // first-attempt-correct count
     answered: 0,         // problems completed
-    input: "",
+    slots: ["",""],
+    slot: 0,
     current: null,
     attemptWrong: false,
     revealed: false,
@@ -545,6 +626,7 @@ function startSession(){
     timer: null
   };
   nextProblem();
+  el("opKey").classList.toggle("hidden", OPS[prefs.op].slots < 2);
   el("scoreLabel").textContent = "0";
   showView("drill");
   renderDrill();
@@ -557,8 +639,12 @@ function startSession(){
 function nextProblem(){
   const lastKey = S.current ? S.current.key : null;
   const p = pickWeighted(S.pool, S.stats, lastKey, S.selection);
-  S.current = { key:p.key, answer:p.answer, disp: OPS[S.op].display(p) };
-  S.input = "";
+  S.current = {
+    key: p.key, answer: p.answer, disp: OPS[S.op].display(p),
+    pairs: S.pairs.get(p.key) || [OPS[S.op].pairOf(p)]
+  };
+  S.slots = ["",""];
+  S.slot = 0;
   S.attemptWrong = false;
   S.revealed = false;
 }
@@ -566,7 +652,7 @@ function nextProblem(){
 function renderDrill(){
   el("problem").textContent = S.current.disp;
   renderAnswer();
-  el("hint").innerHTML = S.revealed ? `= ${S.current.answer}` : "&nbsp;";
+  renderHint();
   el("showBtn").classList.toggle("hidden", S.revealed);
   if (S.format === "fixed"){
     el("status").classList.remove("timer","low");
@@ -576,9 +662,15 @@ function renderDrill(){
 
 function renderAnswer(bad){
   const a = el("answer");
-  a.className = "answerbox num" + (S.input === "" ? " empty" : "") + (bad ? " bad" : "");
-  a.textContent = S.input === "" ? (bad ? "" : "·") : S.input;
-  if (bad && S.input === "") a.textContent = "·";
+  const op = OPS[S.op];
+  const blank = S.slots.slice(0, op.slots).every(v => v === "");
+  a.className = "answerbox num" + (blank ? " empty" : "") + (bad ? " bad" : "");
+  if (op.slots === 1){
+    a.textContent = S.slots[0] === "" ? "·" : S.slots[0];
+  } else {
+    const cell = i => S.slots[i] !== "" ? S.slots[i] : (S.slot === i ? "·" : "\u2013");
+    a.textContent = `${cell(0)} ${op.symbol} ${cell(1)}`;
+  }
 }
 
 function updateTimer(){
@@ -592,21 +684,37 @@ function updateTimer(){
 }
 
 function press(d){
-  if (S.input.length >= 4) return;        // sanity cap (max answer 20*20=400)
-  S.input += d;
+  const op = OPS[S.op], i = S.slot;
+  if (S.slots[i].length >= op.maxLen[i]) return;
+  S.slots[i] += d;
   evaluate();
 }
+
+/* Advance to the second slot. Needed because after typing "1" the app cannot
+   know whether the factor is 1 or 12, so it cannot auto-commit the way
+   single-answer mode does. */
+function nextSlot(){
+  if (OPS[S.op].slots < 2) return;
+  if (S.slot === 0 && S.slots[0] !== ""){ S.slot = 1; renderAnswer(false); }
+}
+
 function backspace(){
-  S.input = S.input.slice(0, -1);
+  const i = S.slot;
+  if (S.slots[i] === "" && i > 0) S.slot = 0;
+  else S.slots[i] = S.slots[i].slice(0, -1);
   renderAnswer(false);
-  el("hint").innerHTML = S.revealed ? `= ${S.current.answer}` : "&nbsp;";
+  renderHint();
+}
+
+function renderHint(){
+  el("hint").innerHTML = S.revealed ? `= ${OPS[S.op].reveal(S.current)}` : "&nbsp;";
 }
 
 function evaluate(){
-  const ans = String(S.current.answer);
-  if (S.input === ans){ onCorrect(); }
-  else if (S.input.length >= ans.length){ onWrong(); }
-  else { renderAnswer(false); }
+  const r = OPS[S.op].check(S.slots, S.current);
+  if (r === "correct") onCorrect();
+  else if (r === "wrong") onWrong();
+  else renderAnswer(false);
 }
 
 function bumpStat(key, field){
@@ -629,7 +737,8 @@ function onWrong(){
     S.missed.add(S.current.key);
     S.attemptWrong = true;
   }
-  S.input = "";
+  S.slots = ["",""];
+  S.slot = 0;
   renderAnswer(true);
 }
 
@@ -641,8 +750,9 @@ function showAnswer(){
     S.attemptWrong = true;
   }
   S.revealed = true;
-  S.input = "";
-  el("hint").innerHTML = `= ${S.current.answer}`;
+  S.slots = ["",""];
+  S.slot = 0;
+  el("hint").innerHTML = `= ${OPS[S.op].reveal(S.current)}`;
   el("showBtn").classList.add("hidden");
   renderAnswer(false);   // user types the revealed answer to advance
 }
@@ -793,7 +903,9 @@ el("pad").addEventListener("click", e => {
   const btn = e.target.closest("button[data-k]");
   if (!btn) return;
   const k = btn.dataset.k;
-  if (k === "back") backspace(); else press(k);
+  if (k === "back") backspace();
+  else if (k === "next") nextSlot();
+  else press(k);
 });
 
 // physical keyboard (handy for desktop testing)
@@ -801,6 +913,7 @@ document.addEventListener("keydown", e => {
   if (!el("drill").classList.contains("active")) return;
   if (e.key >= "0" && e.key <= "9") press(e.key);
   else if (e.key === "Backspace") backspace();
+  else if (e.key === "x" || e.key === "*" || e.key === " " || e.key === "Enter") { e.preventDefault(); nextSlot(); }
   else if (e.key === "Escape") quitDrill();
   else if (e.key === "?" || e.key === "/") showAnswer();
 });
