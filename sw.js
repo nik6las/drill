@@ -3,7 +3,7 @@
      online, fall back to cache when offline) -> no more stale-update surprises.
    - Static assets (icons, manifest): cache-first.
    Bump CACHE whenever you want to force-drop old cached assets. */
-const CACHE = "mathdrill-v3";
+const CACHE = "mathdrill-v5";
 const ASSETS = [
   "./",
   "./index.html",
