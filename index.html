@@ -22,6 +22,7 @@
     --line:#e5e7eb;
     --accent:#3538cd;      /* single accent: indigo */
     --wrong:#d11a2a;
+    --ok:#0f9d58;         /* only used for the partial-progress flash */
     --btn:#f4f4f5;
     --btn-active:#e4e4e7;
   }
@@ -117,6 +118,7 @@
   .answerbox{ font-size:clamp(2rem,12vw,4rem); font-weight:600; min-height:1.2em; line-height:1.2; color:var(--accent); }
   .answerbox.empty{ color:var(--line); }
   .answerbox.bad{ color:var(--wrong); }
+  .answerbox.good{ color:var(--ok); }
   .hint{ font-size:clamp(1.1rem,5vw,1.6rem); color:var(--fg); min-height:1.4em; font-weight:700; }
 
   .revealrow{ display:flex; justify-content:center; padding:2px 12px 6px; }
@@ -340,7 +342,8 @@ const OPS = {
     /* ---- answer model ----
        slots  : how many numbers the user enters
        maxLen : digit cap per slot
-       check  : "correct" | "wrong" | "pending", called after every keypress
+       check  : "correct" | "partial" | "wrong" | "pending", after every keypress
+                "partial" = a right answer with more still owed on this problem
        reveal : what "Show answer" displays AND what the user must type back */
     slots: 1,
     maxLen: [4],
@@ -377,19 +380,30 @@ const OPS = {
       const [sa, sb] = slots;
       if (sa === "") return "pending";
       const a = Number(sa);
-      // every partner of `a` among this product's selected pairs
+      /* Partners of `a` among the pairs still OWED. Already-found pairs are
+         excluded, so re-entering one reads as wrong rather than as progress. */
       const partners = [];
       cur.pairs.forEach(([x,y]) => {
+        if (cur.found.has(pairKey(x,y))) return;
         if (x === a) partners.push(y);
         else if (y === a) partners.push(x);
       });
       if (!partners.length) return sb === "" ? "pending" : "wrong";
       if (sb === "") return "pending";
-      if (partners.some(v => String(v) === sb)) return "correct";
+      const hit = partners.find(v => String(v) === sb);
+      if (hit !== undefined){
+        // last one owed finishes the problem; anything earlier is partial
+        return cur.found.size + 1 >= cur.pairs.length ? "correct" : "partial";
+      }
       if (partners.some(v => String(v).startsWith(sb))) return "pending";
       return "wrong";
     },
-    reveal(cur){ const [a,b] = cur.pairs[0]; return `${a} × ${b}`; }
+    // called on "partial" to bank the pair just entered
+    record(slots, cur){ cur.found.add(pairKey(Number(slots[0]), Number(slots[1]))); },
+    reveal(cur){
+      return cur.pairs.filter(([a,b]) => !cur.found.has(pairKey(a,b)))
+                      .map(([a,b]) => `${a} × ${b}`).join(",  ");
+    }
   }
 
   /* Example of a future, non-commutative operation:
@@ -616,6 +630,7 @@ function startSession(){
     answered: 0,         // problems completed
     slots: ["",""],
     slot: 0,
+    flash: null,
     current: null,
     attemptWrong: false,
     revealed: false,
@@ -641,7 +656,8 @@ function nextProblem(){
   const p = pickWeighted(S.pool, S.stats, lastKey, S.selection);
   S.current = {
     key: p.key, answer: p.answer, disp: OPS[S.op].display(p),
-    pairs: S.pairs.get(p.key) || [OPS[S.op].pairOf(p)]
+    pairs: S.pairs.get(p.key) || [OPS[S.op].pairOf(p)],
+    found: new Set()
   };
   S.slots = ["",""];
   S.slot = 0;
@@ -663,6 +679,7 @@ function renderDrill(){
 function renderAnswer(bad){
   const a = el("answer");
   const op = OPS[S.op];
+  if (S.flash){ clearTimeout(S.flash); S.flash = null; }
   const blank = S.slots.slice(0, op.slots).every(v => v === "");
   a.className = "answerbox num" + (blank ? " empty" : "") + (bad ? " bad" : "");
   if (op.slots === 1){
@@ -711,10 +728,25 @@ function renderHint(){
 }
 
 function evaluate(){
-  const r = OPS[S.op].check(S.slots, S.current);
+  const op = OPS[S.op];
+  const r = op.check(S.slots, S.current);
   if (r === "correct") onCorrect();
+  else if (r === "partial") onPartial();
   else if (r === "wrong") onWrong();
   else renderAnswer(false);
+}
+
+/* A correct pair on a product that still owes more. Bank it, flash the box
+   green, reset for the next entry — deliberately with no count of what's left. */
+function onPartial(){
+  OPS[S.op].record(S.slots, S.current);
+  S.slots = ["",""];
+  S.slot = 0;
+  const a = el("answer");
+  a.className = "answerbox num good";
+  a.textContent = "\u00b7";
+  clearTimeout(S.flash);
+  S.flash = setTimeout(() => renderAnswer(false), 260);
 }
 
 function bumpStat(key, field){
